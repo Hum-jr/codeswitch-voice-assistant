@@ -1,0 +1,5 @@
+openai-whisper
+jiwer
+pandas
+numpy
+# torch is installed by openai-whisper; for a GPU build see https://pytorch.org

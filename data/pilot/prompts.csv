@@ -1,0 +1,31 @@
+id,intent,lang_type,en_terms,text
+P01,hatirlatma_kur,mixed,meeting,Yarın meeting için hatırlatma ekle
+P02,listele,mixed,deadline|task,Cuma deadline'ı olan task'ları listele
+P03,gorev_ekle,mixed,report|task,Report'u bitirmek için yeni bir task ekle
+P04,hatirlatma_kur,mixed,gym|reminder,Akşam sekizde gym için reminder kur
+P05,tamamla,mixed,task|done,Market task'ını done olarak işaretle
+P06,sil,mixed,meeting,Yarınki meeting'i sil
+P07,ertele,mixed,meeting,Meeting'i bir saat ertele
+P08,duzenle,mixed,deadline,Projenin deadline'ını pazartesiye değiştir
+P09,listele,mixed,today|task,Today için olan task'ları göster
+P10,hatirlatma_kur,mixed,call,Saat üçte Ahmet'e call için hatırlat
+P11,gorev_ekle,mixed,assignment,Matematik assignment'ı için görev oluştur
+P12,ertele,mixed,reminder|snooze,Bu reminder'ı on dakika snooze yap
+P13,iptal_diger,mixed,cancel,Cancel et boşver
+P14,tamamla,mixed,meeting,Sabahki meeting'i tamamlandı yap
+P15,duzenle,mixed,task|title,Son task'ın title'ını değiştir
+P16,listele,mixed,week,Bu week neler var
+P17,belirsiz,mixed,meeting,Meeting'i yarına at
+P18,belirsiz,mixed,task,Şu task'ı hallet
+P19,gorev_ekle,tr,,Süt almak için yeni görev ekle
+P20,hatirlatma_kur,tr,,Yarın sabah dokuzda toplantıyı hatırlat
+P21,listele,tr,,Bu haftaki görevlerimi listele
+P22,tamamla,tr,,Çamaşır görevini tamamlandı olarak işaretle
+P23,sil,tr,,Dünkü hatırlatmayı sil
+P24,ertele,tr,,Spor hatırlatmasını yarına ertele
+P25,gorev_ekle,en,,Add a task to buy groceries
+P26,hatirlatma_kur,en,,Remind me to call mom at five
+P27,listele,en,,Show my tasks for tomorrow
+P28,sil,en,,Delete the dentist reminder
+P29,ertele,en,,Snooze this reminder for ten minutes
+P30,belirsiz,en,,Move the meeting to Friday

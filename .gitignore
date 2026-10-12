@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+ml/**/results/
+
+# Voice recordings are personal data (KVKK) – never commit them
+data/recordings/
+*.wav
+
+# Models
+*.onnx
+*.pt
