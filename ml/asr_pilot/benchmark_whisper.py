@@ -24,15 +24,24 @@ import whisper
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PROMPTS = REPO / "data" / "pilot" / "prompts.csv"
 
+# Bump when decoding settings change so cached results are recomputed.
+RUN_VERSION = "v2"
+
+# v1 lessons (pilot S01, 2026-10-17):
+#  - free language ID picked Swahili/Polish/Korean/... for Turkish speech  -> restrict LID to tr/en
+#  - a sentence-style prompt was copied into the output                   -> vocabulary-only prompt
+#  - temperature=0 without fallback produced repetition loops            -> Whisper's default fallback
+VOCAB_PROMPT = "meeting, task, deadline, reminder, snooze, toplantı, görev, hatırlatma"
+TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)  # Whisper default; retried when output looks like a loop
+
 # Decoding configurations to compare.
-INITIAL_PROMPT = (
-    "Türkçe ve İngilizce karışık komutlar: meeting, task, deadline, reminder, "
-    "toplantı, görev, hatırlatma ekle."
-)
+#   lid = detect the language first, but only choose between Turkish and English
 CONFIGS = {
-    "auto": dict(language=None),
+    "auto": dict(),
     "tr": dict(language="tr"),
-    "tr_prompt": dict(language="tr", initial_prompt=INITIAL_PROMPT),
+    "tr_prompt": dict(language="tr", initial_prompt=VOCAB_PROMPT),
+    "lid": dict(lid=True),
+    "lid_prompt": dict(lid=True, initial_prompt=VOCAB_PROMPT),
 }
 
 
@@ -91,24 +100,66 @@ def load_clips(recordings: Path, prompts_csv: Path) -> pd.DataFrame:
     return df[df["path"].map(Path.exists)].reset_index(drop=True)
 
 
+# ---------------------------------------------------------------- model loading
+def load_model_with_retry(name: str, device: str, attempts: int = 3):
+    """Large downloads (small = 461 MB) can break on slow connections and fail the
+    checksum. Whisper re-downloads a file whose checksum is wrong, so just retry."""
+    for i in range(1, attempts + 1):
+        try:
+            return whisper.load_model(name, device=device)
+        except RuntimeError as e:
+            if "SHA256" not in str(e) or i == attempts:
+                raise
+            print(f"download of '{name}' was corrupted, retrying ({i}/{attempts - 1})...")
+
+
 # ---------------------------------------------------------------- main
 def run(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     clips = load_clips(Path(args.recordings), Path(args.prompts))
+    clip_keys = sorted(f"{c.speaker}|{c.condition}|{c.prompt_id}|{c.timestamp}" for c in clips.itertuples())
     print(f"{len(clips)} clips, device={device}")
-    rows = []
+
+    # per-model results are cached so a crash or a re-run never repeats finished models
+    cache_dir = Path(args.out) / "_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    frames = []
     for model_name in args.models:
-        model = whisper.load_model(model_name, device=device)
+        cache_file = cache_dir / f"{model_name}_{RUN_VERSION}.csv"
+        if cache_file.exists() and not args.force:
+            cached = pd.read_csv(cache_file, dtype={"speaker": str}, encoding="utf-8-sig", keep_default_na=False,
+                                 na_values=[""])
+            if (sorted(cached["clip_key"].unique()) == clip_keys
+                    and set(cached["config"]) == set(CONFIGS)):
+                print(f"skip: {model_name} (cached results for the same clips)")
+                frames.append(cached)
+                continue
+        rows = []
+        model = load_model_with_retry(model_name, device)
         for cfg_name, cfg in CONFIGS.items():
             for c in clips.itertuples():
                 audio = load_wav(c.path)
+                opts = dict(cfg)
+                use_lid = opts.pop("lid", False)
                 t0 = time.perf_counter()
+                p_tr = p_en = np.nan
+                if use_lid:
+                    mel = whisper.log_mel_spectrogram(
+                        whisper.pad_or_trim(audio), n_mels=model.dims.n_mels
+                    ).to(model.device)
+                    _, probs = model.detect_language(mel)
+                    p_tr, p_en = probs.get("tr", 0.0), probs.get("en", 0.0)
+                    opts["language"] = "tr" if p_tr >= p_en else "en"
                 res = model.transcribe(
                     audio,
-                    temperature=0.0,
+                    temperature=TEMPERATURES,
+                    compression_ratio_threshold=2.4,
+                    logprob_threshold=-1.0,
+                    no_speech_threshold=0.6,
                     fp16=(device == "cuda"),
                     condition_on_previous_text=False,
-                    **cfg,
+                    **opts,
                 )
                 latency = time.perf_counter() - t0
                 segs = res.get("segments") or []
@@ -116,11 +167,13 @@ def run(args):
                 hyp_n = normalize(hyp)
                 terms = [t for t in c.en_terms.split("|") if t]
                 rows.append(dict(
+                    clip_key=f"{c.speaker}|{c.condition}|{c.prompt_id}|{c.timestamp}",
                     model=model_name, config=cfg_name, speaker=c.speaker,
                     condition=c.condition, prompt_id=c.prompt_id, lang_type=c.lang_type,
                     intent=c.intent, reference=c.text, hypothesis=hyp,
                     ref_norm=normalize(c.text), hyp_norm=hyp_n,
                     detected_lang=res.get("language"),
+                    lid_p_tr=p_tr, lid_p_en=p_en,
                     avg_logprob=np.mean([s["avg_logprob"] for s in segs]) if segs else np.nan,
                     no_speech_prob=np.mean([s["no_speech_prob"] for s in segs]) if segs else np.nan,
                     en_term_retention=term_retention(terms, hyp_n),
@@ -130,9 +183,12 @@ def run(args):
         del model
         if device == "cuda":
             torch.cuda.empty_cache()
+        model_df = pd.DataFrame(rows)
+        model_df.to_csv(cache_file, index=False, encoding="utf-8-sig")
+        frames.append(model_df)
 
-    per_clip = pd.DataFrame(rows)
-    per_clip["hyp_norm"] = per_clip["hyp_norm"].replace("", "<empty>")
+    per_clip = pd.concat(frames, ignore_index=True)
+    per_clip["hyp_norm"] = per_clip["hyp_norm"].fillna("").astype(str).replace("", "<empty>")
 
     def agg(g):
         return pd.Series(dict(
@@ -162,4 +218,5 @@ if __name__ == "__main__":
     p.add_argument("--prompts", default=str(DEFAULT_PROMPTS))
     p.add_argument("--models", nargs="+", default=["tiny", "base", "small"])
     p.add_argument("--out", default=str(Path(__file__).parent / "results"))
+    p.add_argument("--force", action="store_true", help="ignore cached results and re-run all models")
     run(p.parse_args())
