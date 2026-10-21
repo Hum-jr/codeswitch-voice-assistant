@@ -47,6 +47,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -70,7 +71,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.ben.karmaasistan.ui.theme.KarmaAsistanTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 import kotlin.math.max
@@ -133,11 +139,52 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
 
     val recorder = remember { WavRecorder() }
     val player = remember { TakePlayer() }
+    val scope = rememberCoroutineScope()
+
+    // ---- on-device ASR (whisper.cpp) ----
+    var models by remember { mutableStateOf(WhisperEngine.availableModels(context)) }
+    var modelIndex by rememberSaveable { mutableIntStateOf(0) }
+    var engine by remember { mutableStateOf<WhisperEngine?>(null) }
+    var engineStatus by remember { mutableStateOf("") }
+    var asr by remember { mutableStateOf<AsrResult?>(null) }
+    var asrBusy by remember { mutableStateOf(false) }
+    var asrNote by remember { mutableStateOf<String?>(null) }  // shown instead of a transcript
+    var windowIndex by rememberSaveable { mutableIntStateOf(0) }  // index into AUDIO_CTX_OPTIONS
+    var cpuInfo by remember { mutableStateOf("") }
+    var batchJob by remember { mutableStateOf<Job?>(null) }
+    var batchStatus by remember { mutableStateOf("") }
+
     DisposableEffect(Unit) {
         onDispose {
             recorder.cancel()
             player.release()
+            engine?.close()
         }
+    }
+
+    // (re)load the selected model off the main thread
+    LaunchedEffect(modelIndex, models) {
+        val file = models.getOrNull(modelIndex)
+        val old = engine
+        engine = null
+        if (file == null) {
+            withContext(Dispatchers.IO) { old?.close() }
+            engineStatus = "Model yok: ggml-*.bin dosyasını files/models klasörüne kopyalayın"
+            return@LaunchedEffect
+        }
+        engineStatus = "Model yükleniyor: ${WhisperEngine.displayName(file)}…"
+        val loaded = withContext(Dispatchers.IO) {
+            old?.close()
+            runCatching {
+                WhisperEngine.load(file).also { eng ->
+                    val window = WhisperEngine.AUDIO_CTX_OPTIONS[windowIndex]
+                    if (window != eng.audioCtx) eng.setAudioCtx(window)
+                }
+            }
+        }
+        cpuInfo = runCatching { WhisperEngine.cpuFeatures() }.getOrDefault("")
+        loaded.onSuccess { engine = it; engineStatus = "" }
+            .onFailure { engineStatus = it.message ?: "Model yüklenemedi" }
     }
 
     // live waveform + timer while recording
@@ -176,12 +223,89 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
         takeFile.delete()
         levels.clear()
         elapsed = 0.0
+        asr = null
+        asrNote = null
         phase = Phase.Idle
+    }
+
+    fun transcribeTake() {
+        asr = null
+        val eng = engine
+        if (eng == null) {
+            // make the missing model visible instead of silently skipping transcription
+            asrNote = engineStatus.ifEmpty { "Model yüklü değil" } + " – yukarıdaki ASR düğmesine dokunun"
+            return
+        }
+        asrNote = null
+        val audio = runCatching { WavIO.readMono16(takeFile) }.getOrNull()
+        if (audio == null) {
+            asrNote = "Kayıt okunamadı"
+            return
+        }
+        asrBusy = true
+        scope.launch {
+            val result = withContext(Dispatchers.Default) { runCatching { eng.transcribe(audio) } }
+            result.onSuccess { asr = it }.onFailure { asrNote = "ASR hatası: ${it.message}" }
+            asrBusy = false
+        }
+    }
+
+    /** Tap the model pill: rescan the models folder if there is nothing to switch to, else switch. */
+    fun cycleModel() {
+        if (models.size <= 1) {
+            models = WhisperEngine.availableModels(context)
+        } else {
+            modelIndex = (modelIndex + 1) % models.size
+        }
+    }
+
+    /** Tap the window pill: 10 s -> 15 s -> 30 s encoder window (smaller = faster). */
+    fun cycleWindow() {
+        windowIndex = (windowIndex + 1) % WhisperEngine.AUDIO_CTX_OPTIONS.size
+        val eng = engine ?: return
+        val window = WhisperEngine.AUDIO_CTX_OPTIONS[windowIndex]
+        asrBusy = true
+        engineStatus = "Pencere ayarlanıyor…"
+        scope.launch {
+            withContext(Dispatchers.Default) { runCatching { eng.setAudioCtx(window) } }
+            engineStatus = ""
+            asrBusy = false
+        }
+    }
+
+    fun toggleBatch() {
+        batchJob?.let {
+            it.cancel()
+            batchJob = null
+            batchStatus = "Toplu test durduruldu"
+            return
+        }
+        val eng = engine ?: run { message = engineStatus.ifEmpty { "Model yüklü değil" }; return }
+        batchStatus = "Toplu test başlıyor…"
+        batchJob = scope.launch {
+            val result = withContext(Dispatchers.Default) {
+                runCatching {
+                    BatchAsr.run(
+                        engine = eng,
+                        recordingsDir = recordingsDir,
+                        onProgress = { done, total -> batchStatus = "Toplu test (${eng.modelName}): $done / $total" },
+                        isActive = { isActive },
+                    )
+                }
+            }
+            result.onSuccess { batchStatus = "Bitti → ${it.name}" }
+                .onFailure { batchStatus = "Toplu test hatası: ${it.message}" }
+            batchJob = null
+        }
     }
 
     fun onCenterClick() {
         when (phase) {
             Phase.Idle -> {
+                if (batchJob != null) {
+                    message = "Toplu test sürerken kayıt yapılamaz"
+                    return
+                }
                 if (!hasMicPermission) {
                     permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     return
@@ -198,7 +322,7 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
             Phase.Recording -> {
                 elapsed = recorder.stop(takeFile)
                 phase = Phase.Review
-                if (elapsed < 0.5) message = "Kayıt çok kısa, tekrar dene"
+                if (elapsed < 0.5) message = "Kayıt çok kısa, tekrar dene" else transcribeTake()
             }
             Phase.Review -> {
                 if (isPlaying) {
@@ -246,6 +370,37 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
                     onToggleCondition = { condition = if (condition == "quiet") "noisy" else "quiet" },
                     editable = phase == Phase.Idle,
                 )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val idle = phase == Phase.Idle && batchJob == null && !asrBusy
+                    Pill(onClick = if (idle) ({ cycleModel() }) else null) {
+                        Text(
+                            "ASR: " + (models.getOrNull(modelIndex)?.let { WhisperEngine.displayName(it) } ?: "model yok"),
+                            color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Pill(onClick = if (idle) ({ cycleWindow() }) else null) {
+                        Text(
+                            "⏱ " + WhisperEngine.windowLabel(WhisperEngine.AUDIO_CTX_OPTIONS[windowIndex]),
+                            color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Pill(onClick = if (phase == Phase.Idle && engine != null) ({ toggleBatch() }) else null) {
+                        Text(
+                            if (batchJob != null) "Durdur" else "Toplu test",
+                            color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                        )
+                    }
+                }
+                if (cpuInfo.isNotEmpty()) {
+                    Text("CPU: $cpuInfo", color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
+                listOf(engineStatus, batchStatus).filter { it.isNotEmpty() }.forEach {
+                    Text(it, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                }
                 Spacer(Modifier.weight(1f))
                 PromptBubble(prompt, alreadyRecorded)
                 Spacer(Modifier.height(16.dp))
@@ -290,6 +445,9 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
                 levels = levels,
                 isPlaying = isPlaying,
                 playProgress = playProgress,
+                asr = asr,
+                asrBusy = asrBusy,
+                asrNote = asrNote,
                 onCenterClick = { onCenterClick() },
                 onRetry = {
                     resetTake()
@@ -403,6 +561,9 @@ private fun RecorderSheet(
     levels: List<Float>,
     isPlaying: Boolean,
     playProgress: Float,
+    asr: AsrResult?,
+    asrBusy: Boolean,
+    asrNote: String?,
     onCenterClick: () -> Unit,
     onRetry: () -> Unit,
     onSend: () -> Unit,
@@ -449,6 +610,10 @@ private fun RecorderSheet(
             color = Muted,
             style = MaterialTheme.typography.bodySmall,
         )
+        if (reviewing) {
+            Spacer(Modifier.height(10.dp))
+            AsrCard(asr, asrBusy, asrNote)
+        }
         Spacer(Modifier.height(14.dp))
 
         Waveform(
@@ -491,6 +656,36 @@ private fun RecorderSheet(
                         .rotate(-30f),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AsrCard(asr: AsrResult?, busy: Boolean, note: String?) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Mist.copy(alpha = 0.6f))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        if (note != null && !busy && asr == null) {
+            Text(note, color = Coral, fontSize = 13.sp)
+        } else if (busy || asr == null) {
+            Text("Yazıya dökülüyor…", color = Muted, fontSize = 14.sp)
+        } else {
+            Text(
+                asr.text.ifEmpty { "(boş)" },
+                color = TealDeep, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+            )
+            Text(
+                String.format(
+                    Locale.US, "%s · %.2f s · pencere %s · p(tr)=%.2f p(en)=%.2f · güven %.2f",
+                    asr.language, asr.latencyMs / 1000.0, WhisperEngine.windowLabel(asr.audioCtx),
+                    asr.pTr, asr.pEn, kotlin.math.exp(asr.meanLogProb),
+                ),
+                color = Muted, fontSize = 11.sp,
+            )
         }
     }
 }

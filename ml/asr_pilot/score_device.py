@@ -18,7 +18,8 @@ from benchmark_whisper import DEFAULT_PROMPTS, normalize
 
 def main(args):
     rec = Path(args.recordings)
-    files = sorted(rec.glob("asr_*.csv"))
+    # batch result files only (the summary written below has a different name)
+    files = sorted(f for f in rec.glob("asr_*.csv") if not f.name.startswith("asr_device_summary"))
     if not files:
         raise SystemExit(f"no asr_*.csv files in {rec}")
     prompts = pd.read_csv(args.prompts, dtype=str, keep_default_na=False)
@@ -56,7 +57,7 @@ def main(args):
     by_sp = d.groupby(["model", "speaker", "condition", "lang_type"]).apply(agg, include_groups=False).reset_index()
     print(by_sp.pivot_table(index=["model", "speaker", "condition"], columns="lang_type", values="WER").round(2).to_string())
 
-    out = rec / "asr_device_summary.csv"
+    out = rec / "device_asr_summary.csv"
     by_sp.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"\nsaved {out}")
 
