@@ -122,116 +122,128 @@ def load_model_with_retry(name: str, device: str, attempts: int = 3):
 
 
 # ---------------------------------------------------------------- main
+def transcribe_clip(model, c, cfg, device):
+    audio = load_wav(c.path)
+    opts = dict(cfg)
+    use_lid = opts.pop("lid", False)
+    t0 = time.perf_counter()
+    p_tr = p_en = np.nan
+    if use_lid:
+        mel = whisper.log_mel_spectrogram(
+            whisper.pad_or_trim(audio), n_mels=model.dims.n_mels
+        ).to(model.device)
+        _, probs = model.detect_language(mel)
+        p_tr, p_en = probs.get("tr", 0.0), probs.get("en", 0.0)
+        if use_lid == "bias":
+            is_en = p_en >= EN_MIN_PROB and p_en > EN_MARGIN * p_tr
+            opts["language"] = "en" if is_en else "tr"
+        else:
+            opts["language"] = "tr" if p_tr >= p_en else "en"
+    res = model.transcribe(
+        audio,
+        temperature=TEMPERATURES,
+        compression_ratio_threshold=2.4,
+        logprob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        fp16=(device == "cuda"),
+        condition_on_previous_text=False,
+        **opts,
+    )
+    latency = time.perf_counter() - t0
+    segs = res.get("segments") or []
+    hyp = res["text"].strip()
+    hyp_n = normalize(hyp)
+    terms = [t for t in c.en_terms.split("|") if t]
+    return dict(
+        detected_lang=res.get("language"), hypothesis=hyp, hyp_norm=hyp_n,
+        lid_p_tr=p_tr, lid_p_en=p_en,
+        avg_logprob=np.mean([s["avg_logprob"] for s in segs]) if segs else np.nan,
+        no_speech_prob=np.mean([s["no_speech_prob"] for s in segs]) if segs else np.nan,
+        en_term_retention=term_retention(terms, hyp_n),
+        latency_s=latency, audio_s=len(audio) / 16000,
+    )
+
+
+def agg(g):
+    return pd.Series(dict(
+        n=len(g),
+        WER=jiwer.wer(list(g.ref_norm), list(g.hyp_norm)),
+        CER=jiwer.cer(list(g.ref_norm), list(g.hyp_norm)),
+        en_term_retention=g.en_term_retention.dropna().mean(),
+        mean_latency_s=g.latency_s.mean(),
+        RTF=g.latency_s.sum() / g.audio_s.sum(),
+    ))
+
+
 def run(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     clips = load_clips(Path(args.recordings), Path(args.prompts))
-    clip_keys = sorted(f"{c.speaker}|{c.condition}|{c.prompt_id}|{c.timestamp}" for c in clips.itertuples())
-    print(f"{len(clips)} clips, device={device}")
+    clips["clip_key"] = [f"{c.speaker}|{c.condition}|{c.prompt_id}|{c.timestamp}" for c in clips.itertuples()]
+    configs = args.configs or list(CONFIGS)
+    unknown = [k for k in configs if k not in CONFIGS]
+    if unknown:
+        raise SystemExit(f"unknown config(s): {unknown}; choose from {list(CONFIGS)}")
+    print(f"{len(clips)} clips from speakers {sorted(clips.speaker.unique())}, "
+          f"configs={configs}, device={device}")
 
-    # per-model results are cached so a crash or a re-run never repeats finished models
+    # Results are cached per (clip, config): adding speakers or configs only runs what is new.
     cache_dir = Path(args.out) / "_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     frames = []
     for model_name in args.models:
         cache_file = cache_dir / f"{model_name}_{RUN_VERSION}.csv"
-        cached = None
-        todo = list(CONFIGS)
+        cached = pd.DataFrame()
         if cache_file.exists() and not args.force:
-            cached = pd.read_csv(cache_file, dtype={"speaker": str}, encoding="utf-8-sig", keep_default_na=False,
-                                 na_values=[""])
-            if sorted(cached["clip_key"].unique()) == clip_keys:
-                todo = [k for k in CONFIGS if k not in set(cached["config"])]
-                cached = cached[cached["config"].isin(CONFIGS)]
-            else:
-                cached = None  # different clips -> recompute everything
-        if not todo:
-            print(f"skip: {model_name} (cached results for the same clips)")
-            frames.append(cached)
-            continue
-        if cached is not None:
-            print(f"{model_name}: reusing cached configs, running only {todo}")
-        rows = []
-        model = load_model_with_retry(model_name, device)
-        for cfg_name in todo:
-            cfg = CONFIGS[cfg_name]
-            for c in clips.itertuples():
-                audio = load_wav(c.path)
-                opts = dict(cfg)
-                use_lid = opts.pop("lid", False)
-                t0 = time.perf_counter()
-                p_tr = p_en = np.nan
-                if use_lid:
-                    mel = whisper.log_mel_spectrogram(
-                        whisper.pad_or_trim(audio), n_mels=model.dims.n_mels
-                    ).to(model.device)
-                    _, probs = model.detect_language(mel)
-                    p_tr, p_en = probs.get("tr", 0.0), probs.get("en", 0.0)
-                    if use_lid == "bias":
-                        is_en = p_en >= EN_MIN_PROB and p_en > EN_MARGIN * p_tr
-                        opts["language"] = "en" if is_en else "tr"
-                    else:
-                        opts["language"] = "tr" if p_tr >= p_en else "en"
-                res = model.transcribe(
-                    audio,
-                    temperature=TEMPERATURES,
-                    compression_ratio_threshold=2.4,
-                    logprob_threshold=-1.0,
-                    no_speech_threshold=0.6,
-                    fp16=(device == "cuda"),
-                    condition_on_previous_text=False,
-                    **opts,
-                )
-                latency = time.perf_counter() - t0
-                segs = res.get("segments") or []
-                hyp = res["text"].strip()
-                hyp_n = normalize(hyp)
-                terms = [t for t in c.en_terms.split("|") if t]
+            cached = pd.read_csv(cache_file, dtype={"speaker": str}, encoding="utf-8-sig",
+                                 keep_default_na=False, na_values=[""])
+        done = set(zip(cached.get("clip_key", []), cached.get("config", [])))
+        todo = [(cfg, c) for cfg in configs for c in clips.itertuples() if (c.clip_key, cfg) not in done]
+        if todo:
+            print(f"{model_name}: {len(todo)} new clip×config runs "
+                  f"({len(clips) * len(configs) - len(todo)} cached)")
+            model = load_model_with_retry(model_name, device)
+            rows = []
+            for i, (cfg_name, c) in enumerate(todo, 1):
+                r = transcribe_clip(model, c, CONFIGS[cfg_name], device)
                 rows.append(dict(
-                    clip_key=f"{c.speaker}|{c.condition}|{c.prompt_id}|{c.timestamp}",
-                    model=model_name, config=cfg_name, speaker=c.speaker,
+                    clip_key=c.clip_key, model=model_name, config=cfg_name, speaker=c.speaker,
                     condition=c.condition, prompt_id=c.prompt_id, lang_type=c.lang_type,
-                    intent=c.intent, reference=c.text, hypothesis=hyp,
-                    ref_norm=normalize(c.text), hyp_norm=hyp_n,
-                    detected_lang=res.get("language"),
-                    lid_p_tr=p_tr, lid_p_en=p_en,
-                    avg_logprob=np.mean([s["avg_logprob"] for s in segs]) if segs else np.nan,
-                    no_speech_prob=np.mean([s["no_speech_prob"] for s in segs]) if segs else np.nan,
-                    en_term_retention=term_retention(terms, hyp_n),
-                    latency_s=latency, audio_s=len(audio) / 16000,
+                    intent=c.intent, reference=c.text, ref_norm=normalize(c.text), **r,
                 ))
-            print(f"done: {model_name}/{cfg_name}")
-        del model
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        model_df = pd.DataFrame(rows)
-        if cached is not None:
-            model_df = pd.concat([cached, model_df], ignore_index=True)
-        model_df.to_csv(cache_file, index=False, encoding="utf-8-sig")
-        frames.append(model_df)
+                if i % 30 == 0 or i == len(todo):
+                    print(f"  {model_name}: {i}/{len(todo)}")
+                    # save progress regularly so an interruption loses little work
+                    pd.concat([cached, pd.DataFrame(rows)], ignore_index=True).to_csv(
+                        cache_file, index=False, encoding="utf-8-sig")
+            cached = pd.concat([cached, pd.DataFrame(rows)], ignore_index=True)
+            del model
+            if device == "cuda":
+                torch.cuda.empty_cache()
+        else:
+            print(f"skip: {model_name} (all requested results cached)")
+        sel = cached[cached.clip_key.isin(clips.clip_key) & cached.config.isin(configs)]
+        frames.append(sel.drop_duplicates(["clip_key", "config"], keep="last"))
 
     per_clip = pd.concat(frames, ignore_index=True)
     per_clip["hyp_norm"] = per_clip["hyp_norm"].fillna("").astype(str).replace("", "<empty>")
 
-    def agg(g):
-        return pd.Series(dict(
-            n=len(g),
-            WER=jiwer.wer(list(g.ref_norm), list(g.hyp_norm)),
-            CER=jiwer.cer(list(g.ref_norm), list(g.hyp_norm)),
-            en_term_retention=g.en_term_retention.dropna().mean(),
-            mean_latency_s=g.latency_s.mean(),
-            RTF=g.latency_s.sum() / g.audio_s.sum(),
-        ))
-
-    keys = ["model", "config", "condition", "lang_type"]
-    summary = per_clip.groupby(keys).apply(agg, include_groups=False).reset_index()
+    by_lang = per_clip.groupby(["model", "config", "lang_type"]).apply(agg, include_groups=False).reset_index()
+    by_speaker = per_clip.groupby(["model", "config", "speaker", "condition", "lang_type"]).apply(
+        agg, include_groups=False).reset_index()
 
     out = Path(args.out) / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
     per_clip.to_csv(out / "per_clip.csv", index=False, encoding="utf-8-sig")
-    summary.to_csv(out / "summary.csv", index=False, encoding="utf-8-sig")
-    pd.set_option("display.width", 160)
-    print(summary.round(3).to_string(index=False))
+    by_lang.to_csv(out / "summary.csv", index=False, encoding="utf-8-sig")
+    by_speaker.to_csv(out / "summary_by_speaker.csv", index=False, encoding="utf-8-sig")
+
+    pd.set_option("display.width", 200)
+    print("\n=== All speakers, by language type ===")
+    print(by_lang.round(3).to_string(index=False))
+    print("\n=== WER by speaker (rows: model/config, columns: speaker-condition / language type) ===")
+    piv = by_speaker.assign(col=by_speaker.speaker + "-" + by_speaker.condition + "/" + by_speaker.lang_type)
+    print(piv.pivot_table(index=["model", "config"], columns="col", values="WER").round(2).to_string())
     print(f"\nsaved to {out}")
 
 
@@ -240,6 +252,7 @@ if __name__ == "__main__":
     p.add_argument("--recordings", required=True, help="folder with manifest.csv from the phone")
     p.add_argument("--prompts", default=str(DEFAULT_PROMPTS))
     p.add_argument("--models", nargs="+", default=["tiny", "base", "small"])
+    p.add_argument("--configs", nargs="+", help=f"subset of decoding configs (default: all)")
     p.add_argument("--out", default=str(Path(__file__).parent / "results"))
     p.add_argument("--force", action="store_true", help="ignore cached results and re-run all models")
     run(p.parse_args())
