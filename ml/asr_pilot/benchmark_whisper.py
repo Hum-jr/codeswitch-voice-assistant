@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PROMPTS = REPO / "data" / "pilot" / "prompts.csv"
 
 # Bump when decoding settings change so cached results are recomputed.
-RUN_VERSION = "v2"
+RUN_VERSION = "v2"  # new configs are added without invalidating cached ones
 
 # v1 lessons (pilot S01, 2026-10-17):
 #  - free language ID picked Swahili/Polish/Korean/... for Turkish speech  -> restrict LID to tr/en
@@ -35,13 +35,21 @@ VOCAB_PROMPT = "meeting, task, deadline, reminder, snooze, toplantı, görev, ha
 TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)  # Whisper default; retried when output looks like a loop
 
 # Decoding configurations to compare.
-#   lid = detect the language first, but only choose between Turkish and English
+#   lid      = detect the language first, but only choose between Turkish and English
+#   lid_bias = same, but default to Turkish unless English is clearly more likely (FR-04).
+#              The app is Turkish-first; v2 showed both probabilities can be ~0 for
+#              non-native speakers, making a plain tr-vs-en comparison a coin flip.
+#              Thresholds are provisional and will be re-tuned on held-out speakers.
+EN_MIN_PROB = 0.05      # English needs at least this much probability...
+EN_MARGIN = 2.0         # ...and must be this many times more likely than Turkish
 CONFIGS = {
     "auto": dict(),
     "tr": dict(language="tr"),
     "tr_prompt": dict(language="tr", initial_prompt=VOCAB_PROMPT),
     "lid": dict(lid=True),
     "lid_prompt": dict(lid=True, initial_prompt=VOCAB_PROMPT),
+    "lid_bias": dict(lid="bias"),
+    "lid_bias_prompt": dict(lid="bias", initial_prompt=VOCAB_PROMPT),
 }
 
 
@@ -127,17 +135,26 @@ def run(args):
     frames = []
     for model_name in args.models:
         cache_file = cache_dir / f"{model_name}_{RUN_VERSION}.csv"
+        cached = None
+        todo = list(CONFIGS)
         if cache_file.exists() and not args.force:
             cached = pd.read_csv(cache_file, dtype={"speaker": str}, encoding="utf-8-sig", keep_default_na=False,
                                  na_values=[""])
-            if (sorted(cached["clip_key"].unique()) == clip_keys
-                    and set(cached["config"]) == set(CONFIGS)):
-                print(f"skip: {model_name} (cached results for the same clips)")
-                frames.append(cached)
-                continue
+            if sorted(cached["clip_key"].unique()) == clip_keys:
+                todo = [k for k in CONFIGS if k not in set(cached["config"])]
+                cached = cached[cached["config"].isin(CONFIGS)]
+            else:
+                cached = None  # different clips -> recompute everything
+        if not todo:
+            print(f"skip: {model_name} (cached results for the same clips)")
+            frames.append(cached)
+            continue
+        if cached is not None:
+            print(f"{model_name}: reusing cached configs, running only {todo}")
         rows = []
         model = load_model_with_retry(model_name, device)
-        for cfg_name, cfg in CONFIGS.items():
+        for cfg_name in todo:
+            cfg = CONFIGS[cfg_name]
             for c in clips.itertuples():
                 audio = load_wav(c.path)
                 opts = dict(cfg)
@@ -150,7 +167,11 @@ def run(args):
                     ).to(model.device)
                     _, probs = model.detect_language(mel)
                     p_tr, p_en = probs.get("tr", 0.0), probs.get("en", 0.0)
-                    opts["language"] = "tr" if p_tr >= p_en else "en"
+                    if use_lid == "bias":
+                        is_en = p_en >= EN_MIN_PROB and p_en > EN_MARGIN * p_tr
+                        opts["language"] = "en" if is_en else "tr"
+                    else:
+                        opts["language"] = "tr" if p_tr >= p_en else "en"
                 res = model.transcribe(
                     audio,
                     temperature=TEMPERATURES,
@@ -184,6 +205,8 @@ def run(args):
         if device == "cuda":
             torch.cuda.empty_cache()
         model_df = pd.DataFrame(rows)
+        if cached is not None:
+            model_df = pd.concat([cached, model_df], ignore_index=True)
         model_df.to_csv(cache_file, index=False, encoding="utf-8-sig")
         frames.append(model_df)
 
