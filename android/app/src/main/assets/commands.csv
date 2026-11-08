@@ -1,0 +1,91 @@
+id,intent,lang_type,ambiguity,alt_intent,pilot_id,en_terms,text
+C001,gorev_ekle,mixed,none,,P03,report|task,Report'u bitirmek için yeni bir task ekle
+C002,gorev_ekle,mixed,none,,P11,assignment,Matematik assignment'ı için görev oluştur
+C003,gorev_ekle,mixed,none,,,task,Listeme bir task ekle: sunum slaytlarını hazırla
+C004,gorev_ekle,mixed,none,,,presentation,Presentation için slaytları hazırla diye görev ekle
+C005,gorev_ekle,mixed,none,,,project|proposal|task,Yarına kadar project proposal'ı yaz diye task oluştur
+C006,gorev_ekle,tr,none,,P19,,Süt almak için yeni görev ekle
+C007,gorev_ekle,tr,none,,,,Listeme kitap iadesi diye bir görev ekle
+C008,gorev_ekle,tr,none,,,,Cuma gününe rapor yazma görevi oluştur
+C009,gorev_ekle,en,none,,P25,,Add a task to buy groceries
+C010,gorev_ekle,en,none,,,,Create a new task called finish the lab report
+C011,hatirlatma_kur,mixed,none,,P01,meeting,Yarın meeting için hatırlatma ekle
+C012,hatirlatma_kur,mixed,none,,P04,gym|reminder,Akşam sekizde gym için reminder kur
+C013,hatirlatma_kur,mixed,none,,P10,call,Saat üçte Ahmet'e call için hatırlat
+C014,hatirlatma_kur,mixed,none,,,tomorrow,Tomorrow sabah dokuzda doktor randevusunu hatırlat
+C015,hatirlatma_kur,mixed,none,,,weekly|report|reminder,Her pazartesi weekly report için reminder koy
+C016,hatirlatma_kur,tr,none,,P20,,Yarın sabah dokuzda toplantıyı hatırlat
+C017,hatirlatma_kur,tr,none,,,,Yarım saat sonra çamaşırları asmamı hatırlat
+C018,hatirlatma_kur,tr,none,,,,Perşembe akşamı annemi aramamı hatırlat
+C019,hatirlatma_kur,en,none,,P26,,Remind me to call mom at five
+C020,hatirlatma_kur,en,none,,,,Set a reminder for the dentist on Monday at ten
+C021,listele,mixed,none,,P02,deadline|task,Cuma deadline'ı olan task'ları listele
+C022,listele,mixed,none,,P09,today|task,Today için olan task'ları göster
+C023,listele,mixed,none,,P16,week,Bu week neler var
+C024,listele,mixed,none,,,reminder,Bütün reminder'larımı göster
+C025,listele,mixed,none,,,task,Tamamlanmamış task'ları listele
+C026,listele,tr,none,,P21,,Bu haftaki görevlerimi listele
+C027,listele,tr,none,,,,Yarın için hangi hatırlatmalarım var
+C028,listele,tr,none,,,,Bugünkü yapılacaklar listemi oku
+C029,listele,en,none,,P27,,Show my tasks for tomorrow
+C030,listele,en,none,,,,What reminders do I have this week
+C031,tamamla,mixed,none,,P05,task|done,Market task'ını done olarak işaretle
+C032,tamamla,mixed,none,,P14,meeting,Sabahki meeting'i tamamlandı yap
+C033,tamamla,mixed,none,,,assignment|complete,"Assignment'ı bitirdim, complete olarak işaretle"
+C034,tamamla,mixed,none,,,gym|task|check,Gym task'ını check et
+C035,tamamla,mixed,none,,,report|task,Report task'ı tamamlandı
+C036,tamamla,tr,none,,P22,,Çamaşır görevini tamamlandı olarak işaretle
+C037,tamamla,tr,none,,,,Süt alma görevini bitti olarak işaretle
+C038,tamamla,tr,none,,,,Bugünkü spor görevini tamamladım
+C039,tamamla,en,none,,,,Mark the grocery task as done
+C040,tamamla,en,none,,,,"I finished the lab report, check it off"
+C041,sil,mixed,none,,P06,meeting,Yarınki meeting'i sil
+C042,sil,mixed,none,,,dentist|reminder,Dentist reminder'ını sil
+C043,sil,mixed,none,,,task|delete,Tamamlanan task'ların hepsini delete et
+C044,sil,mixed,none,,,gym|remove,Gym hatırlatmasını remove et
+C045,sil,mixed,none,,,task,Son eklediğim task'ı sil
+C046,sil,tr,none,,P23,,Dünkü hatırlatmayı sil
+C047,sil,tr,none,,,,Kitap iadesi görevini listeden kaldır
+C048,sil,tr,none,,,,Bütün tamamlanmış görevleri sil
+C049,sil,en,none,,P28,,Delete the dentist reminder
+C050,sil,en,none,,,,Remove the gym task from my list
+C051,duzenle,mixed,none,,P08,deadline,Projenin deadline'ını pazartesiye değiştir
+C052,duzenle,mixed,none,,P15,task|title,Son task'ın title'ını değiştir
+C053,duzenle,mixed,none,,,meeting|update,Meeting'in saatini ikiye update et
+C054,duzenle,mixed,none,,,report|task|priority|high,Report task'ının priority'sini high yap
+C055,duzenle,mixed,none,,,gym|reminder,Gym reminder'ını akşam yediye değiştir
+C056,duzenle,tr,none,,,,Toplantı hatırlatmasının saatini dörde değiştir
+C057,duzenle,tr,none,,,,Süt alma görevinin adını market alışverişi yap
+C058,duzenle,tr,none,,,,Rapor görevinin son tarihini cumaya çek
+C059,duzenle,en,none,,,,Change the meeting time to three pm
+C060,duzenle,en,none,,,,Rename the grocery task to weekly shopping
+C061,ertele,mixed,none,,P07,meeting,Meeting'i bir saat ertele
+C062,ertele,mixed,none,,P12,reminder|snooze,Bu reminder'ı on dakika snooze yap
+C063,ertele,mixed,none,,,deadline|postpone,Deadline'ı bir gün postpone et
+C064,ertele,mixed,none,,,gym|next|week,Gym'i next week'e ertele
+C065,ertele,mixed,none,,,assignment|reminder,Assignment reminder'ını yarım saat ertele
+C066,ertele,tr,none,,P24,,Spor hatırlatmasını yarına ertele
+C067,ertele,tr,none,,,,Bu hatırlatmayı beş dakika sonra tekrar çal
+C068,ertele,tr,none,,,,Toplantıyı bir hafta sonraya ertele
+C069,ertele,en,none,,P29,,Snooze this reminder for ten minutes
+C070,ertele,en,none,,,,Push the dentist reminder to next week
+C071,iptal_diger,mixed,none,,P13,cancel,Cancel et boşver
+C072,iptal_diger,mixed,none,,,never|mind,"Never mind, vazgeçtim"
+C073,iptal_diger,mixed,none,,,stop,"Stop, yanlış söyledim"
+C074,iptal_diger,mixed,none,,,weather,Bugün weather nasıl
+C075,iptal_diger,mixed,none,,,song,Bir song çal
+C076,iptal_diger,tr,none,,,,"Boşver, iptal et"
+C077,iptal_diger,tr,none,,,,"Hayır, onu demek istemedim"
+C078,iptal_diger,tr,none,,,,Bugün hava nasıl
+C079,iptal_diger,en,none,,,,Cancel that
+C080,iptal_diger,en,none,,,,Play some music
+C081,ertele,mixed,intent,duzenle,P17,meeting,Meeting'i yarına at
+C082,tamamla,mixed,reference,sil,P18,task,Şu task'ı hallet
+C083,hatirlatma_kur,mixed,slot,,,meeting,Meeting'i hatırlat
+C084,sil,mixed,reference,,,gym,Gym'i kaldır
+C085,duzenle,mixed,slot,,,deadline,Deadline'ı değiştir
+C086,gorev_ekle,mixed,intent,duzenle,,report,Report'u cumaya koy
+C087,hatirlatma_kur,mixed,intent,gorev_ekle,,call,Akşam call var
+C088,hatirlatma_kur,tr,slot,,,,Toplantıyı unutmayayım
+C089,ertele,tr,reference,duzenle,,,Onu sonraya al
+C090,ertele,en,intent,duzenle,P30,,Move the meeting to Friday

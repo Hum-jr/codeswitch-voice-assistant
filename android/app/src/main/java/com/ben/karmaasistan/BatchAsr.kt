@@ -1,5 +1,8 @@
 package com.ben.karmaasistan
 
+import android.content.Context
+import android.os.Build
+import android.os.PowerManager
 import java.io.File
 import java.util.Locale
 
@@ -24,6 +27,7 @@ object BatchAsr {
     }
 
     fun run(
+        context: Context,
         engine: WhisperEngine,
         recordingsDir: File,
         onProgress: (done: Int, total: Int) -> Unit,
@@ -33,14 +37,20 @@ object BatchAsr {
         require(items.isNotEmpty()) { "Kayıt bulunamadı" }
         val out = File(recordingsDir, "asr_${engine.runLabel}_${System.currentTimeMillis()}.csv")
         out.bufferedWriter().use { w ->
-            w.write("model,speaker,condition,prompt_id,language,p_tr,p_en,mean_logprob,min_p,n_tokens,latency_ms,audio_s,audio_ctx,hypothesis\n")
+            // power_save / thermal are logged per clip: throttled phones give invalid latency numbers
+            w.write("model,speaker,condition,prompt_id,language,p_tr,p_en,mean_logprob,min_p,n_tokens,latency_ms,audio_s,audio_ctx,power_save,thermal,hypothesis\n")
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             for ((i, item) in items.withIndex()) {
                 if (!isActive()) break
                 val r = engine.transcribe(WavIO.readMono16(item.file))
                 w.write(listOf(
                     engine.runLabel, item.speaker, item.condition, item.promptId, r.language,
                     fmt(r.pTr.toDouble()), fmt(r.pEn.toDouble()), fmt(r.meanLogProb), fmt(r.minTokenP),
-                    r.nTokens.toString(), r.latencyMs.toString(), fmt(r.audioSec), r.audioCtx.toString(), quote(r.text),
+                    r.nTokens.toString(), r.latencyMs.toString(), fmt(r.audioSec), r.audioCtx.toString(),
+                    if (pm.isPowerSaveMode) "1" else "0",
+                    // 0 = none … 6 = shutdown (THERMAL_STATUS_*); -1 = not available before Android 10
+                    (if (Build.VERSION.SDK_INT >= 29) pm.currentThermalStatus else -1).toString(),
+                    quote(r.text),
                 ).joinToString(","))
                 w.write("\n")
                 w.flush()

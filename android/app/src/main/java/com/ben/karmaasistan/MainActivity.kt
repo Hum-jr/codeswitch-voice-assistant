@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -106,7 +107,7 @@ private val Muted = Color(0xFF8FAAAD)
 private enum class Phase { Idle, Recording, Review }
 
 /**
- * Pilot data collection screen (İP2/İP3).
+ * Data collection screen (İP2) for the 90-command list, with on-device ASR (İP3).
  * Idle → tap mic → Recording → tap → Review (play / retry / send).
  * "Send" saves recordings/<speaker>/<condition>/<promptId>.wav and logs it in manifest.csv.
  */
@@ -162,6 +163,15 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
         }
     }
 
+    // Keep the screen on during a batch test: with the screen off Android throttles the app
+    // and the latency numbers become invalid (seen on 28.10: median 2.8 s -> 4.9 s).
+    val view = LocalView.current
+    val batchRunning = batchJob != null
+    DisposableEffect(batchRunning) {
+        view.keepScreenOn = batchRunning
+        onDispose { view.keepScreenOn = false }
+    }
+
     // (re)load the selected model off the main thread
     LaunchedEffect(modelIndex, models) {
         val file = models.getOrNull(modelIndex)
@@ -214,7 +224,19 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
 
     val prompt = prompts[index]
     val outFile = File(recordingsDir, "$speakerId/$condition/${prompt.id}.wav")
-    val alreadyRecorded = remember(outFile.path, refreshKey) { outFile.exists() }
+    // A command counts as recorded if this speaker/condition has its C-id file, or — for the
+    // 30 pilot commands — the older P-id file from the pilot session (no need to re-record).
+    fun recordedFile(p: Prompt): File? {
+        val dir = File(recordingsDir, "$speakerId/$condition")
+        return listOf(p.id, p.pilotId).filter { it.isNotEmpty() }
+            .map { File(dir, "$it.wav") }.firstOrNull { it.exists() }
+    }
+    val recordedAs = remember(prompt.id, speakerId, condition, refreshKey) { recordedFile(prompt)?.nameWithoutExtension }
+    val recordedCount = remember(speakerId, condition, refreshKey) { prompts.count { recordedFile(it) != null } }
+
+    /** Index of the next command (after [from], wrapping around) this speaker has not recorded yet. */
+    fun nextMissing(from: Int): Int? =
+        (1..prompts.size).map { (from + it) % prompts.size }.firstOrNull { recordedFile(prompts[it]) == null }
 
     fun resetTake() {
         player.stop()
@@ -286,6 +308,7 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
             val result = withContext(Dispatchers.Default) {
                 runCatching {
                     BatchAsr.run(
+                        context = context,
                         engine = eng,
                         recordingsDir = recordingsDir,
                         onProgress = { done, total -> batchStatus = "Toplu test (${eng.modelName}): $done / $total" },
@@ -346,7 +369,7 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
         message = "✓ ${prompt.id} kaydedildi"
         refreshKey++
         resetTake()
-        if (index < prompts.lastIndex) index++
+        index = nextMissing(index) ?: index
     }
 
     Box(
@@ -402,7 +425,7 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
                     Text(it, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                 }
                 Spacer(Modifier.weight(1f))
-                PromptBubble(prompt, alreadyRecorded)
+                PromptBubble(prompt, recordedAs)
                 Spacer(Modifier.height(16.dp))
                 Row(
                     Modifier.fillMaxWidth(),
@@ -423,6 +446,25 @@ fun PilotRecorderScreen(prompts: List<Prompt>) {
                         enabled = phase == Phase.Idle && index < prompts.lastIndex,
                     ) {
                         Icon(painterResource(R.drawable.ic_chevron_right), "Sonraki", tint = Color.White)
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "$speakerId: $recordedCount / ${prompts.size} kayıtlı",
+                        color = Color.White.copy(alpha = 0.9f),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    if (recordedCount < prompts.size) {
+                        Spacer(Modifier.width(10.dp))
+                        Pill(onClick = if (phase == Phase.Idle) ({
+                            index = if (recordedFile(prompt) == null) index else (nextMissing(index) ?: index)
+                        }) else null) {
+                            Text("Eksik ▶", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        }
                     }
                 }
                 message?.let {
@@ -471,7 +513,7 @@ private fun Header(
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            "Pilot kayıt",
+            "Veri toplama",
             color = Color.White,
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
@@ -515,7 +557,7 @@ private fun Pill(onClick: (() -> Unit)? = null, content: @Composable RowScope.()
 }
 
 @Composable
-private fun PromptBubble(prompt: Prompt, alreadyRecorded: Boolean) {
+private fun PromptBubble(prompt: Prompt, recordedAs: String?) {
     Row(verticalAlignment = Alignment.Top) {
         Box(
             Modifier
@@ -544,7 +586,12 @@ private fun PromptBubble(prompt: Prompt, alreadyRecorded: Boolean) {
             Text(
                 buildString {
                     append(prompt.langType).append(" · ").append(prompt.intent)
-                    if (alreadyRecorded) append("   ✓ kaydedildi")
+                    if (prompt.ambiguity != "none") append(" · belirsiz")
+                    when {
+                        recordedAs == null -> {}
+                        recordedAs == prompt.id -> append("   ✓ kaydedildi")
+                        else -> append("   ✓ kaydedildi (pilot $recordedAs)")
+                    }
                 },
                 color = Color.White.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.labelMedium,

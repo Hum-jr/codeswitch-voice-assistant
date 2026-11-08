@@ -22,7 +22,7 @@ import torch
 import whisper
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_PROMPTS = REPO / "data" / "pilot" / "prompts.csv"
+DEFAULT_PROMPTS = REPO / "data" / "commands.csv"  # İP1 command list (90 commands)
 
 # Bump when decoding settings change so cached results are recomputed.
 RUN_VERSION = "v2"  # new configs are added without invalidating cached ones
@@ -92,8 +92,18 @@ def load_wav(path: Path) -> np.ndarray:
     return pcm.astype(np.float32) / 32768.0
 
 
-def load_clips(recordings: Path, prompts_csv: Path) -> pd.DataFrame:
+def load_prompt_table(prompts_csv) -> pd.DataFrame:
+    """Reads commands.csv (or the old pilot prompts.csv). Recordings from the pilot session are
+    named P01…P30; commands.csv maps them via `pilot_id`, so those ids are added as aliases."""
     prompts = pd.read_csv(prompts_csv, dtype=str, keep_default_na=False)
+    if "pilot_id" in prompts.columns:
+        aliases = prompts[prompts.pilot_id != ""].assign(id=lambda d: d.pilot_id)
+        prompts = pd.concat([prompts, aliases], ignore_index=True)
+    return prompts
+
+
+def load_clips(recordings: Path, prompts_csv: Path) -> pd.DataFrame:
+    prompts = load_prompt_table(prompts_csv)
     man = pd.read_csv(recordings / "manifest.csv", dtype={"speaker": str})
     # re-recordings append rows: keep the latest per speaker/condition/prompt
     man = man.sort_values("timestamp").drop_duplicates(

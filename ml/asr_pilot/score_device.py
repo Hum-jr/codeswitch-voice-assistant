@@ -13,7 +13,7 @@ from pathlib import Path
 import jiwer
 import pandas as pd
 
-from benchmark_whisper import DEFAULT_PROMPTS, normalize
+from benchmark_whisper import DEFAULT_PROMPTS, load_prompt_table, normalize
 
 
 def main(args):
@@ -22,12 +22,24 @@ def main(args):
     files = sorted(f for f in rec.glob("asr_*.csv") if not f.name.startswith("asr_device_summary"))
     if not files:
         raise SystemExit(f"no asr_*.csv files in {rec}")
-    prompts = pd.read_csv(args.prompts, dtype=str, keep_default_na=False)
+    prompts = load_prompt_table(args.prompts)
     d = pd.concat([pd.read_csv(f, dtype={"speaker": str}, keep_default_na=False).assign(run=f.name)
                    for f in files], ignore_index=True)
-    # if a model was batch-tested several times, keep its latest run
-    latest = d.groupby("model")["run"].max()
-    d = d[d.run == d.model.map(latest)]
+    # Several runs per model: keep the latest one that was NOT throttled (latency drift <= 1.3x
+    # between the first and last 20% of the run); fall back to the latest run.
+    def drift(g):
+        q = g.latency_ms.reset_index(drop=True)
+        k = max(1, len(q) // 5)
+        return q[-k:].median() / q[:k].median()
+    runs = d.groupby("run").agg(model=("model", "first")).assign(
+        drift=d.groupby("run").apply(drift, include_groups=False))
+    runs["ok"] = runs.drift <= 1.3
+    chosen = (runs.reset_index().sort_values(["model", "ok", "run"])
+              .groupby("model").tail(1).set_index("model")["run"])
+    skipped = sorted(set(runs.index) - set(chosen))
+    if skipped:
+        print("ignored runs (older or throttled):", ", ".join(skipped))
+    d = d[d.run.isin(chosen)]
     d = d.merge(prompts[["id", "lang_type", "text"]], left_on="prompt_id", right_on="id", how="left")
     d["ref_norm"] = d.text.map(normalize)
     d["hyp_norm"] = d.hypothesis.astype(str).map(normalize).replace("", "<empty>")
@@ -51,6 +63,20 @@ def main(args):
         RTF=("latency_ms", lambda x: x.sum() / 1000 / d.loc[x.index, "audio_s"].sum()),
     )
     print(lat.round(2).to_string())
+
+    # Validity check: throttled phones (screen off, power saving, heat) give invalid latency.
+    print("\n=== Run validity (latency drift and device state) ===")
+    for run, g in d.groupby("run", sort=False):
+        q = g.latency_ms.reset_index(drop=True)
+        k = max(1, len(q) // 5)
+        drift = q[-k:].median() / q[:k].median()
+        notes = [f"first/last 20% median {q[:k].median() / 1000:.2f} s -> {q[-k:].median() / 1000:.2f} s (x{drift:.2f})"]
+        if "power_save" in g:
+            notes.append(f"power-save clips: {(g.power_save == 1).sum()}")
+        if "thermal" in g:
+            notes.append(f"thermal>=2 clips: {(g.thermal >= 2).sum()}")
+        flag = "  <-- CHECK: likely throttled" if drift > 1.3 else ""
+        print(f"{run}: " + "; ".join(notes) + flag)
     print("\n=== WER by language type ===")
     print(d.groupby(["model", "lang_type"]).apply(agg, include_groups=False).round(3).to_string())
     print("\n=== WER by speaker ===")

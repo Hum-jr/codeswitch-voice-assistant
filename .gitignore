@@ -7,9 +7,10 @@ venv/
 ml/**/results/
 
 # Voice recordings are personal data (KVKK) – never commit them
-data/recordings/
+data/recordings*/
 *.wav
 
 # Models
 *.onnx
 *.pt
+*.bin
